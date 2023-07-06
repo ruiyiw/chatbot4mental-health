@@ -1,2 +1,3 @@
 .DS_Store
-faiss_*
+faiss*.db
+faiss*.json
