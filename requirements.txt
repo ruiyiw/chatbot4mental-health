@@ -1,5 +1,4 @@
-farm-haystack==1.16.1
-farm-haystack[faiss]==1.17.2
+spacy
+scikit-learn
 requests
 streamlit
-pydantic==1.10.10

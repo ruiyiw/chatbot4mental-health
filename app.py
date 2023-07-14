@@ -1,70 +1,50 @@
-
+import sqlite3
+import spacy
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
-import pandas as pd
 
-df = pd.read_csv("pdf-collection.csv", index_col=False)
-df.head()
 
-from haystack import Document
+def get_chatbot_response(user_input):
+    conn = sqlite3.connect("keywords_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT url, keywords, summary FROM website_keywords")
+    rows = cursor.fetchall()
 
-# Use data to initialize Document objects
-titles = list(df["title"].values)
-sources = list(df["source"].values)
-texts = list(df["text"].values)
-documents = []
-for title, source, text in zip(titles, sources, texts):
-    documents.append(Document(content=text, meta={"pdf_name": title, "url": source}))
+    nlp = spacy.load("en_core_web_sm")
+    vectorizer = TfidfVectorizer(
+        tokenizer=lambda text: [token.lemma_ for token in nlp(text)],
+        stop_words="english",
+    )
 
-from haystack.document_stores import FAISSDocumentStore
-import os
+    keyword_texts = [row[1] for row in rows]
+    tfidf_matrix = vectorizer.fit_transform(keyword_texts)
 
-if os.path.exists("faiss_storage.db"):
-  document_store = FAISSDocumentStore.load("faiss_storage.db")
-else:
-  document_store = FAISSDocumentStore(faiss_index_factory_str="Flat", return_embedding=True)
+    user_input_lemmas = [token.lemma_ for token in nlp(user_input)]
+    user_input_vector = vectorizer.transform([" ".join(user_input_lemmas)])
 
-from haystack.nodes import DensePassageRetriever, OpenAIAnswerGenerator
+    similarity_scores = cosine_similarity(user_input_vector, tfidf_matrix)[0]
+    similarity_ranking = sorted(
+        enumerate(similarity_scores), key=lambda x: x[1], reverse=True
+    )[:3]
 
-retriever = DensePassageRetriever(
-    document_store=document_store,
-    query_embedding_model="facebook/dpr-question_encoder-single-nq-base",
-    passage_embedding_model="facebook/dpr-ctx_encoder-single-nq-base",
-    use_gpu=True,
-    embed_title=True,
+    resources = []
+
+    for rank, (index, score) in enumerate(similarity_ranking):
+        resource_id = rows[index][0]
+        resource_summary = rows[index][2]
+        resources.append([resource_id, resource_summary])
+
+    return resources
+
+
+st.title("Ask Me About Mental Health!")
+question = st.text_area(
+    "Hi! How are you doing today? You may enter your question here:"
+)  # taking query
+st.sidebar.write(
+    '<p style="color:grey;"> <b> Question History </b>', unsafe_allow_html=True
 )
-
-generator = OpenAIAnswerGenerator(
-    api_key="", # TODO: enter your OpenAI API key. See here: https://platform.openai.com/account/api-keys
-    model="text-davinci-003",
-    # model='text-davinci-edit-001',
-    max_tokens=128,
-    presence_penalty=0.1,
-    frequency_penalty=0.1,
-    top_k=3,
-    temperature=0.9
-)
-
-if not os.path.exists("faiss_storage.db"):
-  # Delete existing documents in documents store
-  document_store.delete_documents()
-
-  # Write documents to document store
-  document_store.write_documents(documents)
-
-  # Add documents embeddings to index
-  document_store.update_embeddings(retriever=retriever)
-
-  document_store.save("faiss_storage.db")
-
-from haystack.pipelines import GenerativeQAPipeline
-
-pipe = GenerativeQAPipeline(generator=generator, retriever=retriever)
-
-
-st.title("Ask Me Anything About Mental Health 🧐")
-question = st.text_area("Hi 😊! How are you doing today? You may enter your question here:") # taking query
-question_history = []
-st.sidebar.write('<p style="color:grey;"> <b> Question History </b>', unsafe_allow_html=True)
 
 with open("question-history.txt", "r") as f:
     for line in f:
@@ -72,26 +52,45 @@ with open("question-history.txt", "r") as f:
 
 if st.button("Get Response"):
     placeholder = st.empty()
-    placeholder.text("Fetching information and generating summary...")
-    params={"Generator": {"top_k": 1}, "Retriever": {"top_k": 3}}
-    prediction = pipe.run(query=question, params=params)
-    
-    st.write('<p style="color:orange;"> <b> Here is a brief summary of what I found in my knowledgebase: </b>', unsafe_allow_html=True)
-    st.write(f'<p> <b> {prediction["answers"][0].answer} </b>', unsafe_allow_html=True)
-    st.write('---')
-    st.write('<p style="color:orange;"> <b> If you wanna see more, here are some additional resources: </b>', unsafe_allow_html=True)
-    for i in range(3):
-        with st.expander(f'**Resource {i+1}:**'):
-            st.write('<p style="color:blue;"> <i> Supporting Document: </i>', unsafe_allow_html=True)
-            st.write(prediction["answers"][0].meta["content"][i])
-            st.write('<p style="color:blue;"> <i> Further Reading: </i>', unsafe_allow_html=True)
-            st.write(prediction["answers"][0].meta["doc_metas"][i]["url"])
+    resource_list = get_chatbot_response(question)
+    placeholder.text("Fetching information and generating summaries...")
+
+    st.write(
+        '<p style="color:red;"> <b> Here is a brief summary of what I found in my knowledgebase: </b>',
+        unsafe_allow_html=True,
+    )
+    st.write(
+        f"<p> <b> {resource_list[0][1]} </b>",
+        unsafe_allow_html=True,
+    )
+    st.write(
+        '<p style="color:green;"> <i> Further Reading: </i>',
+        unsafe_allow_html=True,
+    )
+
+    st.write(resource_list[0][0])
+    st.write("---")
+    st.write(
+        '<p style="color:red;"> <b> Here are some additional resources to help you: </b>',
+        unsafe_allow_html=True,
+    )
+    for i in range(1, 3):
+        with st.expander(f"**Resource {i}:**"):
+            st.write(
+                '<p style="color:green;"> <i> Document Summary: </i>',
+                unsafe_allow_html=True,
+            )
+            st.write(resource_list[i][1])
+            st.write(
+                '<p style="color:green;"> <i> Further Reading: </i>',
+                unsafe_allow_html=True,
+            )
+            st.write(resource_list[i][0])
 
     placeholder.empty()
-    
-    with open("question-history.txt", "a") as f:
-       f.write(question)
-       f.write('\n')
-    
-    st.sidebar.write(question)
 
+    with open("question-history.txt", "a") as f:
+        f.write(question)
+        f.write("\n")
+
+    st.sidebar.write(question)
